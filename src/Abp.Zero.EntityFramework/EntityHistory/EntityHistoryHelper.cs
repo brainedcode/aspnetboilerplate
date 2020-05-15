@@ -82,9 +82,11 @@ namespace Abp.EntityHistory
                     continue;
                 }
 
-                var shouldSaveAuditedPropertiesOnly = !shouldAuditEntity.HasValue && !entityEntry.IsCreated() && !entityEntry.IsDeleted();
-                var entitySet = GetEntitySet(objectContext, entityType);
+                var isAuditableEntity = shouldAuditEntity.HasValue && shouldAuditEntity.Value;
+                var isTrackableEntity = shouldTrackEntity.HasValue && shouldTrackEntity.Value;
+                var shouldSaveAuditedPropertiesOnly = !isAuditableEntity && !isTrackableEntity;
 
+                var entitySet = GetEntitySet(objectContext, entityType);
                 var propertyChanges = new List<EntityPropertyChange>();
                 propertyChanges.AddRange(GetPropertyChanges(entityEntry, entityType, entitySet, shouldSaveAuditedPropertiesOnly));
                 propertyChanges.AddRange(GetRelationshipChanges(entityEntry, entityType, entitySet, relationshipChanges, shouldSaveAuditedPropertiesOnly));
@@ -153,6 +155,9 @@ namespace Abp.EntityHistory
         [CanBeNull]
         private EntityChange CreateEntityChange(DbEntityEntry entityEntry, EntityType entityType)
         {
+            var entityId = GetEntityId(entityEntry, entityType);
+            var entityTypeFullName = entityEntry.GetEntityBaseType().FullName;
+
             EntityChangeType changeType;
             switch (entityEntry.State)
             {
@@ -167,12 +172,12 @@ namespace Abp.EntityHistory
                     break;
                 case EntityState.Detached:
                 case EntityState.Unchanged:
+                    return null;
                 default:
                     Logger.ErrorFormat("Unexpected {0} - {1}", nameof(entityEntry.State), entityEntry.State);
                     return null;
             }
 
-            var entityId = GetEntityId(entityEntry, entityType);
             if (entityId == null && changeType != EntityChangeType.Created)
             {
                 Logger.ErrorFormat("EntityChangeType {0} must have non-empty entity id", changeType);
@@ -184,7 +189,7 @@ namespace Abp.EntityHistory
                 ChangeType = changeType,
                 EntityEntry = entityEntry, // [NotMapped]
                 EntityId = entityId,
-                EntityTypeFullName = entityEntry.GetEntityBaseType().FullName,
+                EntityTypeFullName = entityTypeFullName,
                 TenantId = AbpSession.TenantId
             };
         }
@@ -216,7 +221,18 @@ namespace Abp.EntityHistory
                 .GetItems<EntityContainer>(DataSpace.CSpace)
                 .Single()
                 .EntitySets
-                .Single(e => e.ElementType.Name == entityType.Name);
+                .Single(e => e.ElementType.Name == entityType.Name ||
+                             entityType.BaseType != null && IsBaseTypeHasElementTypeName(e.ElementType.Name, entityType.BaseType));
+        }
+
+        private static bool IsBaseTypeHasElementTypeName(string elementTypeName, EdmType entityEdmType)
+        {
+            if (elementTypeName == entityEdmType.Name)
+            {
+                return true;
+            }
+
+            return entityEdmType.BaseType != null && IsBaseTypeHasElementTypeName(elementTypeName, entityEdmType.BaseType);
         }
 
         /// <summary>

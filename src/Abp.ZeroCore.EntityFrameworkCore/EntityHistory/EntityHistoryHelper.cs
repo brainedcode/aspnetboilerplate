@@ -61,25 +61,26 @@ namespace Abp.EntityHistory
                 }
 
                 var shouldAuditEntity = IsTypeOfAuditedEntity(typeOfEntity);
-                bool? shouldAuditOwnerProperty = null;
-                bool? shouldAuditOwnerEntity = null;
                 if (shouldAuditEntity.HasValue && !shouldAuditEntity.Value)
                 {
                     continue;
                 }
-                else if (!shouldAuditEntity.HasValue && entityEntry.Metadata.IsOwned())
+
+                bool? shouldAuditOwnerEntity = null;
+                bool? shouldAuditOwnerProperty = null;
+                if (!shouldAuditEntity.HasValue && entityEntry.Metadata.IsOwned())
                 {
                     // Check if owner entity has auditing attribute
-                    var foreignKey = entityEntry.Metadata.GetForeignKeys().First();
-                    var ownerEntity = foreignKey.PrincipalEntityType.ClrType;
+                    var ownerForeignKey = entityEntry.Metadata.GetForeignKeys().First(fk => fk.IsOwnership);
+                    var ownerEntityType = ownerForeignKey.PrincipalEntityType.ClrType;
 
-                    shouldAuditOwnerEntity = IsTypeOfAuditedEntity(ownerEntity);
+                    shouldAuditOwnerEntity = IsTypeOfAuditedEntity(ownerEntityType);
                     if (shouldAuditOwnerEntity.HasValue && !shouldAuditOwnerEntity.Value)
                     {
                         continue;
                     }
 
-                    var ownerPropertyInfo = foreignKey.PrincipalToDependent.PropertyInfo;
+                    var ownerPropertyInfo = ownerForeignKey.PrincipalToDependent.PropertyInfo;
                     shouldAuditOwnerProperty = IsAuditedPropertyInfo(ownerPropertyInfo);
                     if (shouldAuditOwnerProperty.HasValue && !shouldAuditOwnerProperty.Value)
                     {
@@ -93,9 +94,11 @@ namespace Abp.EntityHistory
                     continue;
                 }
 
-                var shouldSaveAuditedPropertiesOnly = !(shouldAuditEntity.HasValue || shouldAuditOwnerEntity.HasValue || shouldAuditOwnerProperty.HasValue) && 
-                                                      !entityEntry.IsCreated() &&
-                                                      !entityEntry.IsDeleted();
+                var isAuditableEntity = (shouldAuditEntity.HasValue && shouldAuditEntity.Value) ||
+                                        (shouldAuditOwnerEntity.HasValue && shouldAuditOwnerEntity.Value) ||
+                                        (shouldAuditOwnerProperty.HasValue && shouldAuditOwnerProperty.Value);
+                var isTrackableEntity = shouldTrackEntity.HasValue && shouldTrackEntity.Value;
+                var shouldSaveAuditedPropertiesOnly = !isAuditableEntity && !isTrackableEntity;
                 var propertyChanges = GetPropertyChanges(entityEntry, shouldSaveAuditedPropertiesOnly);
                 if (propertyChanges.Count == 0)
                 {
@@ -160,6 +163,8 @@ namespace Abp.EntityHistory
         [CanBeNull]
         private EntityChange CreateEntityChange(EntityEntry entityEntry)
         {
+            var entityId = GetEntityId(entityEntry);
+            var entityTypeFullName = entityEntry.Entity.GetType().FullName;
             EntityChangeType changeType;
             switch (entityEntry.State)
             {
@@ -174,12 +179,12 @@ namespace Abp.EntityHistory
                     break;
                 case EntityState.Detached:
                 case EntityState.Unchanged:
+                    return null;
                 default:
                     Logger.ErrorFormat("Unexpected {0} - {1}", nameof(entityEntry.State), entityEntry.State);
                     return null;
             }
 
-            var entityId = GetEntityId(entityEntry);
             if (entityId == null && changeType != EntityChangeType.Created)
             {
                 Logger.ErrorFormat("EntityChangeType {0} must have non-empty entity id", changeType);
@@ -191,7 +196,7 @@ namespace Abp.EntityHistory
                 ChangeType = changeType,
                 EntityEntry = entityEntry, // [NotMapped]
                 EntityId = entityId,
-                EntityTypeFullName = entityEntry.Entity.GetType().FullName,
+                EntityTypeFullName = entityTypeFullName,
                 TenantId = AbpSession.TenantId
             };
         }
@@ -211,8 +216,10 @@ namespace Abp.EntityHistory
                     continue;
                 }
 
-                var shouldSaveProperty = property.IsShadowProperty() ||
-                                         (IsAuditedPropertyInfo(property.PropertyInfo) ?? !auditedPropertiesOnly);
+                var shouldSaveProperty = property.IsShadowProperty() // i.e. property.PropertyInfo == null
+                    ? !auditedPropertiesOnly
+                    : IsAuditedPropertyInfo(property.PropertyInfo) ?? !auditedPropertiesOnly;
+
                 if (shouldSaveProperty)
                 {
                     var propertyEntry = entityEntry.Property(property.Name);
@@ -262,7 +269,7 @@ namespace Abp.EntityHistory
                 {
                     foreach (var property in foreignKey.Properties)
                     {
-                        var shouldSaveProperty = property.IsShadowProperty() ? 
+                        var shouldSaveProperty = property.IsShadowProperty() ?
                                                    null :
                                                    IsAuditedPropertyInfo(property.PropertyInfo);
                         if (shouldSaveProperty.HasValue && !shouldSaveProperty.Value)
@@ -284,7 +291,7 @@ namespace Abp.EntityHistory
                 foreach (var propertyChange in entityChange.PropertyChanges)
                 {
                     var propertyEntry = entityEntry.Property(propertyChange.PropertyName);
-                    var isAuditedProperty = !propertyEntry.Metadata.IsShadowProperty() && 
+                    var isAuditedProperty = !propertyEntry.Metadata.IsShadowProperty() &&
                                             IsAuditedPropertyInfo(propertyEntry.Metadata.PropertyInfo) == true;
 
                     // TODO: fix new value comparison before truncation
